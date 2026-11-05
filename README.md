@@ -3,7 +3,7 @@
 ![Windows](https://img.shields.io/badge/platform-Windows-0078D4)
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
 ![Chrome](https://img.shields.io/badge/Chrome-Manifest_V3-4285F4?logo=googlechrome&logoColor=white)
-![Version](https://img.shields.io/badge/version-5.0.3-blue)
+![Version](https://img.shields.io/badge/version-5.0.4-blue)
 
 A Windows CLI that connects Telegram to Gemini in your regular Chrome browser. Chat, request desktop screenshots, and approve PC actions without an AI API key or local model.
 
@@ -21,6 +21,8 @@ Requires Windows, Google Chrome, and Python 3.13 to build.
 5. Start `lyric .` in a new terminal and pair your Telegram account using the displayed code.
 
 Keep Lyric, Chrome, and the connected Gemini tab open. Your normal Chrome session retains your sign-in.
+
+Chrome can stay minimized. Lyric uses background timing and protects the connected tab from automatic unloading until you disconnect. If Chrome freezes the tab or Windows sleeps, open Gemini again before retrying.
 
 ## Commands
 

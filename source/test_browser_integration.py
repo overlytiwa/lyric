@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import json
+import shutil
 import pytest
 from playwright.sync_api import sync_playwright
 sys.path.insert(0,str(Path(__file__).parent))
@@ -31,7 +32,13 @@ function send(){
 }
 </script></body></html>'''
 
-STUB='''window.chrome={runtime:{id:'test-extension',onMessage:{addListener(fn){window.lyricListener=fn}},sendMessage(){return Promise.resolve({})}}};'''
+STUB='''(() => {
+const backgroundClock=setTimeout.bind(window);
+window.chrome={runtime:{id:'test-extension',onMessage:{addListener(fn){window.lyricListener=fn}},sendMessage(message){
+  if(message.type==='lyric-wait')return new Promise(resolve=>backgroundClock(()=>resolve({ok:true}),message.ms));
+  return Promise.resolve({});
+}}};
+})();'''
 
 @pytest.fixture(scope='module')
 def chrome_browser():
@@ -89,6 +96,42 @@ def test_content_script_rejects_outside_gemini_origin(page):
 
 def test_content_script_requires_own_extension_sender(page):
     assert page.evaluate('''() => {let replied=false;const value=window.lyricListener({type:'lyric-status'},{id:'unrelated-extension'},()=>{replied=true});return value===undefined&&!replied}''')
+
+
+def test_send_and_reply_do_not_depend_on_page_timers(page):
+    # Model the severe timer throttling of a long-minimized tab. Gemini's server
+    # result arrives as a DOM update; Lyric must not schedule a page timer at all.
+    page.evaluate('''()=>{
+      window.pageTimers=0;window.sendClicks=0;
+      window.setTimeout=()=>{window.pageTimers++;throw new Error('Page timers are throttled');};
+      window.send=()=>{
+        window.sendClicks++;
+        document.querySelector('[contenteditable]').textContent='';
+        const row=document.createElement('model-response');
+        row.innerHTML='<message-content><div id="model-response-message-content-background'+window.sendClicks+'" aria-busy="false"></div></message-content>';
+        row.querySelector('div').textContent=JSON.stringify({kind:'reply',message:'Background reply '+window.sendClicks,description:'',shell:'powershell',command:''});
+        document.querySelector('rich-textarea').before(row);
+      };
+    }''')
+    first=invoke(page,'Send while minimized')
+    assert not first.get('error'),first
+    assert json.loads(first['text'])['message']=='Background reply 1'
+    second=invoke(page,'Another background request')
+    assert not second.get('error'),second
+    assert json.loads(second['text'])['message']=='Background reply 2'
+    assert page.evaluate('window.pageTimers')==0
+    assert page.evaluate('window.sendClicks')==2
+
+
+def test_connection_loss_during_wait_never_clicks_send(page):
+    page.evaluate('''()=>{
+      window.sendClicks=0;
+      document.querySelector('button[aria-label="Send message"]').onclick=()=>window.sendClicks++;
+      chrome.runtime.sendMessage=async()=>({error:'The Lyric request is no longer active.'});
+    }''')
+    result=invoke(page)
+    assert 'no longer active' in result.get('error','')
+    assert page.evaluate('window.sendClicks')==0
 
 @pytest.mark.parametrize('markup',[
     '<button aria-label="Send" onclick="send()">↑</button>',
@@ -249,3 +292,95 @@ def test_full_lyric_protocol_sends_through_actual_quill_markup(page,monkeypatch,
     assert not result.get('error'),result
     assert page.evaluate('window.sendClicks')==1
     assert json.loads(result['text'])['kind']=='reply'
+
+
+@pytest.fixture
+def live_extension(tmp_path):
+    """Real extension worker and content script, isolated from personal Chrome.
+
+    Only the native process is replaced. Gemini is a local HTML fixture; no
+    Google account, Telegram token, registry changes, or remote requests are used.
+    """
+    extension=tmp_path/'extension'
+    shutil.copytree(Path(__file__).parent.parent/'extension',extension)
+    manifest=json.loads((extension/'manifest.json').read_text())
+    manifest.pop('key',None)  # Never use the installed native host's extension ID.
+    (extension/'manifest.json').write_text(json.dumps(manifest))
+    background=extension/'background.js'
+    background.write_text('''
+globalThis.nativeResults=[];
+globalThis.nativeReceiver=null;
+chrome.runtime.connectNative=()=>({
+  postMessage(message){nativeResults.push(message)},
+  onMessage:{addListener(fn){nativeReceiver=fn}},
+  onDisconnect:{addListener(){}},disconnect(){}
+});
+const register=chrome.runtime.onMessage.addListener.bind(chrome.runtime.onMessage);
+chrome.runtime.onMessage.addListener=fn=>{globalThis.testMessageHandler=fn;register(fn)};
+globalThis.popupMessage=message=>new Promise(reply=>testMessageHandler(message,{id:chrome.runtime.id},reply));
+'''+background.read_text(encoding='utf-8'),encoding='utf-8')
+    with sync_playwright() as pw:
+        if not Path(pw.chromium.executable_path).is_file():
+            pytest.skip('Install Playwright Chromium to run the real extension tests')
+        context=pw.chromium.launch_persistent_context(
+            str(tmp_path/'profile'),channel='chromium',headless=False,
+            args=[f'--disable-extensions-except={extension}',f'--load-extension={extension}'],
+            # Playwright normally disables the very throttling we need to test.
+            ignore_default_args=['--disable-background-timer-throttling',
+                                 '--disable-backgrounding-occluded-windows',
+                                 '--disable-renderer-backgrounding'])
+        try:
+            context.route('https://gemini.google.com/**',lambda route:route.fulfill(
+                status=200,content_type='text/html',body=HTML))
+            worker=context.service_workers[0] if context.service_workers else context.wait_for_event('serviceworker')
+            page=context.pages[0]
+            cdp=context.new_cdp_session(page)
+            window=cdp.send('Browser.getWindowForTarget')['windowId']
+            page.goto('https://gemini.google.com/app')
+            page.wait_for_selector('[contenteditable]')
+            tab_id=worker.evaluate("async()=>{await init;return (await chrome.tabs.query({url:'https://gemini.google.com/app'}))[0].id}")
+            assert worker.evaluate('id=>connect(id)',tab_id)['status']['ready']
+            # Keep Gemini inactive as well as minimizing its window. Some test
+            # desktops do not report native window occlusion to the renderer.
+            worker.evaluate("()=>chrome.tabs.create({url:'about:blank',active:true})")
+            cdp.send('Browser.setWindowBounds',{'windowId':window,'bounds':{'windowState':'minimized'}})
+            worker.evaluate('()=>new Promise(resolve=>setTimeout(resolve,500))')
+            yield context,worker,page,cdp,window,tab_id
+        finally:
+            context.close()
+
+
+def test_real_extension_sends_and_reads_with_chrome_minimized(live_extension):
+    context,worker,page,cdp,window,tab_id=live_extension
+    assert cdp.send('Browser.getWindowBounds',{'windowId':window})['bounds']['windowState']=='minimized'
+    for number in (1,2):
+        result=worker.evaluate('''async number=>{
+          const id='minimized-'+number;
+          await nativeReceiver({type:'request',id,text:'Background prompt '+number});
+          return nativeResults.find(message=>message.type==='result'&&message.id===id);
+        }''',number)
+        assert not result.get('error'),result
+        assert json.loads(result['text'])['message'].startswith(f'Full response {number}')
+        assert page.evaluate('window.lastPrompt')==f'Background prompt {number}'
+        assert cdp.send('Browser.getWindowBounds',{'windowId':window})['bounds']['windowState']=='minimized'
+    assert worker.evaluate('id=>chrome.tabs.get(id).then(tab=>tab.autoDiscardable)',tab_id) is False
+
+
+def test_real_extension_restores_tab_protection_on_disconnect(live_extension):
+    context,worker,page,cdp,window,tab_id=live_extension
+    # Clock requests from extension pages are rejected; only the selected main
+    # Gemini content script with the active request ID may use the clock.
+    result=worker.evaluate("()=>popupMessage({type:'lyric-wait',id:'stale',ms:0})")
+    assert 'no longer active' in result['error']
+    assert worker.evaluate("()=>popupMessage({type:'popup-disconnect'})")=={'ok':True}
+    assert worker.evaluate('id=>chrome.tabs.get(id).then(tab=>tab.autoDiscardable)',tab_id) is True
+    assert worker.evaluate("()=>chrome.storage.session.get('protection')")=={}
+
+
+def test_real_extension_keeps_existing_discard_preference(live_extension):
+    context,worker,page,cdp,window,tab_id=live_extension
+    assert worker.evaluate("()=>popupMessage({type:'popup-disconnect'})")=={'ok':True}
+    worker.evaluate('id=>chrome.tabs.update(id,{autoDiscardable:false})',tab_id)
+    worker.evaluate('id=>connect(id)',tab_id)
+    assert worker.evaluate("()=>popupMessage({type:'popup-disconnect'})")=={'ok':True}
+    assert worker.evaluate('id=>chrome.tabs.get(id).then(tab=>tab.autoDiscardable)',tab_id) is False

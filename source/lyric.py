@@ -25,7 +25,7 @@ import requests
 from PIL import ImageGrab
 from extension_bridge import GeminiBrowser, BrowserError, install_extension, native_main
 
-VERSION = '5.0.3'
+VERSION = '5.0.4'
 MODEL = 'Gemini website (regular Chrome extension)'
 DEFAULT_MODEL = MODEL
 BANNER = r'''

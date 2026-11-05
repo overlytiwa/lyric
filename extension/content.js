@@ -6,7 +6,13 @@ const STOP='button[data-test-id="stop-button"],button[aria-label*="Stop response
 const visible=el=>!!el && el.getClientRects().length>0 && getComputedStyle(el).visibility!=='hidden';
 const xpath=value=>document.evaluate(value,document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;
 const app=()=>location.origin==='https://gemini.google.com' && (location.pathname==='/app'||location.pathname.startsWith('/app/'));
-const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+let requestId=null;
+// A minimized tab's chained timers can run only once a minute. The extension
+// worker owns the clock, so sending and completion checks don't inherit that delay.
+async function sleep(ms){
+  const result=await chrome.runtime.sendMessage({type:'lyric-wait',id:requestId,ms});
+  if(result?.ok!==true)throw new Error(result?.error||'The Lyric connection changed. Refresh Gemini and reconnect the extension.');
+}
 const editor=()=>[...document.querySelectorAll('rich-textarea .ql-editor[contenteditable="true"][role="textbox"]'),
   ...document.querySelectorAll('[role="textbox"][contenteditable="true"],rich-textarea [contenteditable="true"]:not(.ql-clipboard)'),
   xpath(INPUT_XPATH)].find(el=>visible(el)&&el.isContentEditable&&!el.classList.contains('ql-clipboard'));
@@ -171,9 +177,9 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
   if(busy){reply({error:'Gemini is already processing another Lyric request.'});return;}
   const command=message.command;
   if(!command||!['request','reset'].includes(command.type)||typeof command.id!=='string')return;
-  busy=true;
+  busy=true;requestId=command.id;
   (command.type==='reset'?reset():exchange(String(command.text||'')))
-    .then(text=>reply({text})).catch(error=>reply({error:error.message})).finally(()=>{busy=false;});
+    .then(text=>reply({text})).catch(error=>reply({error:error.message})).finally(()=>{busy=false;requestId=null;});
   return true;
 });
 chrome.runtime.sendMessage({type:'content-ready'}).catch(()=>{});
