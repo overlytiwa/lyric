@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Lyric \u2014 Gemini Bridge",
+  "version": "5.0.2",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApAVTTsLppIeYMpezYgAUpqAVefa8XqkLduDnc/IkQ2Gs8bA3yY/IxXAio6VgbOL81wcjLKdFwNlVgfVGSASgrxMW9VmJ9ClzAfZ/NV7hUmi7exskCheo9Di89Twvpfv+OSG2lALDCd6/H891BNg721xm9vY14t0HinVlpBInafFk5XOPcrtzgUN21fTmFDQoIfVLKKfTJx+jg0j7mzGJPBnY3sw2gjg8PrPFKUqqZslQRmpXG+F1NHrRyrtNOse6sVMd2Mlz8IxiXJLXlH5BUTSPK0X37nk8ybfM7ZAfEUZn+PAE3Ch8hL9gllmwuZa0YnI4R9ICT7eJXycHbKqBIQIDAQAB",
+  "description": "Connect Lyric to a Gemini tab in your regular Chrome. No cookie or password access.",
+  "permissions": [
+    "nativeMessaging",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://gemini.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Lyric",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
